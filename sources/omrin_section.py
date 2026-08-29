@@ -111,24 +111,31 @@ def build_section(arg1, huisnummer=None, today: date | None = None):
     calendar = get_calendar(postcode, huisnummer, today)
     items = find_tomorrow_items(calendar, today)
     tomorrow = today + timedelta(days=1)
+
+    # If we have calendar data but no items for tomorrow, that means
+    # explicitly: nothing is collected tomorrow. Show that to readers.
+    if calendar and not items:
+        return f"""
+        <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
+            ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
+        </h2>
+        <p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>
+        """
+
     if items:
         return render_html(items, tomorrow)
 
-    # Fallback: try the HTML scraper in sources/omrin if the API/cache
-    # returned no items. That scraper may succeed for addresses where the
-    # API doesn't provide the expected month range.
+    # No calendar data available (cache empty / API didn't return months).
+    # Try the HTML scraper fallback which sometimes works when the API
+    # doesn't expose the needed range.
     try:
         from sources import omrin as web_omrin
 
         waste_cfg = {"postcode": postcode, "huisnummer": huisnummer}
-        # propagate toevoeging if present in config path
         if isinstance(arg1, dict):
             waste_cfg["toevoeging"] = arg1.get("waste", {}).get("toevoeging", "")
 
         collections = web_omrin.get_tomorrow_collections(waste_cfg)
-        # web_omrin.render_html handles None / empty list appropriately
         return web_omrin.render_html(collections)
     except Exception:
-        # If fallback fails, show the generic no-data message we already
-        # display when the API returns nothing.
         return render_no_data(tomorrow)
