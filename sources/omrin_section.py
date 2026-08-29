@@ -111,6 +111,24 @@ def build_section(arg1, huisnummer=None, today: date | None = None):
     calendar = get_calendar(postcode, huisnummer, today)
     items = find_tomorrow_items(calendar, today)
     tomorrow = today + timedelta(days=1)
-    if not items:
+    if items:
+        return render_html(items, tomorrow)
+
+    # Fallback: try the HTML scraper in sources/omrin if the API/cache
+    # returned no items. That scraper may succeed for addresses where the
+    # API doesn't provide the expected month range.
+    try:
+        from sources import omrin as web_omrin
+
+        waste_cfg = {"postcode": postcode, "huisnummer": huisnummer}
+        # propagate toevoeging if present in config path
+        if isinstance(arg1, dict):
+            waste_cfg["toevoeging"] = arg1.get("waste", {}).get("toevoeging", "")
+
+        collections = web_omrin.get_tomorrow_collections(waste_cfg)
+        # web_omrin.render_html handles None / empty list appropriately
+        return web_omrin.render_html(collections)
+    except Exception:
+        # If fallback fails, show the generic no-data message we already
+        # display when the API returns nothing.
         return render_no_data(tomorrow)
-    return render_html(items, tomorrow)
