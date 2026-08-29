@@ -44,6 +44,7 @@ def build_sections(config: dict) -> tuple[list[str], list[tuple[str, bytes, str]
         ("Weer", weather),
         ("Slieker Film", slieker),
         ("NOS", nos),
+        ("LC", __import__("sources.lc", fromlist=[None])),
     ]
 
     # Energy is built separately since it also returns an image to embed.
