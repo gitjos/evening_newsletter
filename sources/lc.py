@@ -53,8 +53,6 @@ def render_html(headlines: list[Headline]) -> str:
 
 def build_section(config: dict) -> str:
     cfg = config.get("lc", {})
-    rss_url = cfg.get("rss_url")
-    if not rss_url:
-        raise RuntimeError("LC RSS URL not configured (config.json 'lc.rss_url')")
+    rss_url = cfg.get("rss_url", "https://www.lc.nl/rss")
     headlines = get_top_headlines(rss_url, cfg.get("headline_count", 5))
     return render_html(headlines)
