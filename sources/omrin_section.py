@@ -77,6 +77,16 @@ def render_html(items, tomorrow: date):
     """
 
 
+def render_no_data(tomorrow: date):
+    return f"""
+    <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
+        ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
+    </h2>
+    <p style="font-family:Arial,sans-serif; font-size:14px; color:#333;">
+        Geen ophaaldata beschikbaar voor dit adres. Controleer uw postcode/huisnummer in de configuratie of bezoek de <a href="https://www.omrin.nl" style="color:#1a5fb4;">Omrin-website</a> voor de meest recente informatie.
+    </p>
+    """
+
 
 def build_section(arg1, huisnummer=None, today: date | None = None):
     """Builds the Omrin section.
@@ -100,6 +110,7 @@ def build_section(arg1, huisnummer=None, today: date | None = None):
 
     calendar = get_calendar(postcode, huisnummer, today)
     items = find_tomorrow_items(calendar, today)
+    tomorrow = today + timedelta(days=1)
     if not items:
-        return None
-    return render_html(items, today + timedelta(days=1))
+        return render_no_data(tomorrow)
+    return render_html(items, tomorrow)
