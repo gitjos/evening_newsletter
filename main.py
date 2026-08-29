@@ -43,6 +43,7 @@ def build_sections(config: dict) -> tuple[list[str], list[tuple[str, bytes, str]
         ("Omrin", omrin_section),
         ("Weer", weather),
         ("Slieker Film", slieker),
+        ("Vandaag — geschiedenis", __import__("sources.history", fromlist=[None])),
         ("NOS", nos),
         ("LC", __import__("sources.lc", fromlist=[None])),
     ]
