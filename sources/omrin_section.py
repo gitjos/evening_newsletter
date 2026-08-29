@@ -125,7 +125,34 @@ def build_section(arg1, huisnummer=None, today: date | None = None):
     if items:
         return render_html(items, tomorrow)
 
-    # No calendar data available (cache empty / API didn't return months).
+    # No calendar data available for the current month.
+    # Inspect the full cache: if there are entries for other months but
+    # none for tomorrow, we can safely conclude "nothing collected
+    # tomorrow" and show that. Only if the cache is empty do we try the
+    # web-scraper fallback.
+    full_cache = _load_cache()
+    if full_cache:
+        # Check if any cached entry matches tomorrow
+        found = False
+        for month_items in full_cache.values():
+            for it in month_items:
+                try:
+                    d = datetime.strptime(it["Datum"], DATETIME_FORMAT).date()
+                    if d == tomorrow:
+                        found = True
+                        break
+                except Exception:
+                    continue
+            if found:
+                break
+        if not found:
+            return f"""
+            <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
+                ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
+            </h2>
+            <p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>
+            """
+
     # Try the HTML scraper fallback which sometimes works when the API
     # doesn't expose the needed range.
     try:
