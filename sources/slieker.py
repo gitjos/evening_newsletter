@@ -1,27 +1,29 @@
 """
-Today's Slieker Film programme (time + title, title linking to the
-booking/movie page).
+Tomorrow's Slieker Film programme (time + title, title linking to the
+film's page on sliekerfilm.nl).
 
-sliekerfilm.nl itself renders its programme through a JS booking widget,
-which is unpleasant to scrape headlessly and breaks on every redesign.
-MovieMeter maintains a plain-HTML cinema agenda page per cinema (including
-Slieker), grouped by day, that links straight through to Slieker's own
-ticket pages — so we scrape that instead and still land the user on
-sliekerfilm.nl to book/read about the film.
+Deliberately *tomorrow*, not today: this newsletter goes out at 22:00, by
+which point today's showings have mostly already happened. Tomorrow's
+programme is the one that's actually actionable.
 
-NOTE: this is still screen-scraping a public page that isn't an API and can
-change its markup. If this module starts coming back empty, open
-`schedule_url` from config.json in a browser, view source, and check that
-the anchor id pattern `day_DD` (DD = day-of-month) and the surrounding
-`<a href="/film/...">` / `<a href="/boek-je-ticket/?event=...">` structure
-below still match.
+Turns out sliekerfilm.nl/programma/ is server-rendered after all — the
+"no-js scheduler" wrapper class had me assume it needed a browser to render,
+but the actual schedule HTML (a `day-DD-MM-YYYY` anchor per day, with
+`<a href="/film/...">` entries under it) is right there in the initial page
+load. So we scrape sliekerfilm.nl directly now, no more going via
+MovieMeter as a proxy.
+
+NOTE: still screen-scraping a public page that isn't an API and can change
+its markup. If this module starts coming back empty, fetch `schedule_url`
+from config.json, view source, and check that the `day-DD-MM-YYYY` anchor
+id and the surrounding `<a href="/film/...">` structure below still match.
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import requests
 from bs4 import BeautifulSoup
@@ -76,11 +78,10 @@ def find_entry_container(link_tag, max_depth: int = 6):
     return None
 
 
-def get_todays_programme(schedule_url: str) -> list[Showing]:
+def get_programme_for_day(schedule_url: str, day: date) -> list[Showing]:
     html = _fetch_html(schedule_url)
     soup = BeautifulSoup(html, "html.parser")
-    today = datetime.now().date()
-    day_section, day_id = find_day_section(soup, today)
+    day_section, day_id = find_day_section(soup, day)
 
     if day_section is None:
         return []
@@ -129,12 +130,12 @@ def render_html(showings: list[Showing], schedule_url: str | None = None) -> str
         if schedule_url:
             body = (
                 '<p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">'
-                'Geen voorstellingen vandaag — bekijk het volledige '
+                'Geen voorstellingen morgen — bekijk het volledige '
                 f'<a href="{schedule_url}" style="color:#1a5fb4; text-decoration:none;">programma</a>.'
                 '</p>'
             )
         else:
-            body = '<p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Geen voorstellingen vandaag.</p>'
+            body = '<p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Geen voorstellingen morgen.</p>'
     else:
         rows = "\n".join(
             ('<li style="margin-bottom:6px;">'
@@ -147,7 +148,7 @@ def render_html(showings: list[Showing], schedule_url: str | None = None) -> str
 
     return f"""
     <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
-        🎬 Slieker Film – vandaag
+        🎬 Slieker Film – morgen
     </h2>
     {body}
     """
@@ -155,5 +156,6 @@ def render_html(showings: list[Showing], schedule_url: str | None = None) -> str
 
 def build_section(config: dict) -> str:
     schedule_url = config["slieker"]["schedule_url"]
-    showings = get_todays_programme(schedule_url)
+    tomorrow = datetime.now().date() + timedelta(days=1)
+    showings = get_programme_for_day(schedule_url, tomorrow)
     return render_html(showings, schedule_url)

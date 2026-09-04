@@ -1,53 +1,94 @@
-# omrin_section.py
+"""
+Wraps sources/omrin_api.py (the real Freed/Omrin backend) with a monthly
+cache, so we don't hit the API more than once a month, and a fallback to
+the old HTML scraper (sources/omrin.py) if the API is ever unreachable.
+
+Two bugs fixed here from the first pass at this file:
+
+1. `from omrin_api import ...` was a bare import. That only resolves when
+   a script runs *from inside* sources/ (e.g. `cd sources && python
+   test_omrin.py`) — which is how the standalone test worked. Run through
+   main.py from the project root, as cron actually does, and the import
+   fails, and the `except ImportError:` below silently swallowed it and
+   substituted a stub that always returns []. That's *why the real API
+   looked broken* even though test_omrin.py proved it works. Fixed to an
+   absolute `from sources.omrin_api import ...`, and the fallback now logs
+   a warning instead of failing silently.
+
+2. A failed or empty fetch used to get cached and then treated as
+   authoritative "nothing collected" data — so once the API failed once,
+   every run for the rest of the month confidently reported "morgen wordt
+   niets opgehaald" instead of retrying or falling back to the scraper.
+   Only a genuinely non-empty result is cached now; a failure always
+   retries next run and falls through to the HTML-scraper fallback
+   immediately, rather than being masked for a month.
+"""
+from __future__ import annotations
+
 import json
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-try:
-    from omrin_api import fetch_omrin_calendar
-except ImportError:
-    def fetch_omrin_calendar(postcode, huisnummer):
-        return []
+log = logging.getLogger(__name__)
 
-  
+try:
+    from sources.omrin_api import fetch_omrin_calendar
+except ImportError:
+    log.warning(
+        "sources.omrin_api could not be imported (missing rsa/pycryptodome?) "
+        "— Omrin API disabled for this run, falling back to the HTML scraper."
+    )
+    fetch_omrin_calendar = None
+
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "omrin_cache.json"
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
 
-def _load_cache():
+def _cache_key(postcode: str, huisnummer: int, today: date) -> str:
+    return f"{postcode}-{huisnummer}-{today.strftime('%Y-%m')}"
+
+
+def _load_cache() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {}
 
 
-def _save_cache(cache):
+def _save_cache(cache: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(cache))
 
 
-def _get_cached_month(key):
+def get_calendar(postcode: str, huisnummer: int, today: date) -> list:
+    """Returns the cached calendar for this address if we have one, else
+    fetches fresh from the API. Never caches an empty/failed result —
+    that would silently masquerade as "confirmed nothing scheduled"."""
+    key = _cache_key(postcode, huisnummer, today)
     cache = _load_cache()
-    return cache.get(key)
-
-
-def _store_cached_month(key, data):
-    cache = _load_cache()
-    cache[key] = data
-    _save_cache(cache)
-
-
-def get_calendar(postcode, huisnummer, today: date):
-    key = today.strftime("%Y-%m")
-    cached = _get_cached_month(key)
+    cached = cache.get(key)
     if cached:
         return cached
 
-    data = fetch_omrin_calendar(postcode, huisnummer)
-    _store_cached_month(key, data)
+    if fetch_omrin_calendar is None:
+        return []
+
+    try:
+        data = fetch_omrin_calendar(postcode, huisnummer)
+    except Exception:
+        log.exception("Omrin API call failed")
+        return []
+
+    if data:
+        cache[key] = data
+        _save_cache(cache)
+    else:
+        log.warning("Omrin API returned no calendar data for %s %s", postcode, huisnummer)
+
     return data
 
 
-def find_tomorrow_items(calendar_data, today: date):
+def find_tomorrow_items(calendar_data: list, today: date) -> list:
     tomorrow = today + timedelta(days=1)
     items = []
     for item in calendar_data:
@@ -57,112 +98,68 @@ def find_tomorrow_items(calendar_data, today: date):
     return items
 
 
-
-def render_html(items, tomorrow: date):
-    rows = []
-    for item in items:
-        rows.append(
-            f"<li><b>{item.get('Omschrijving','')}</b> – {item.get('Info','')}</li>"
-        )
-
-    items_html = "\n".join(rows)
-
+def _wrap(body_html: str, tomorrow: date) -> str:
     return f"""
     <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
         ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
     </h2>
-    <ul style="font-family:Arial,sans-serif; font-size:14px;">
-        {items_html}
-    </ul>
+    {body_html}
     """
 
 
-def render_no_data(tomorrow: date):
-    return f"""
-    <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
-        ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
-    </h2>
-    <p style="font-family:Arial,sans-serif; font-size:14px; color:#333;">
-        Geen ophaaldata beschikbaar voor dit adres. Controleer uw postcode/huisnummer in de configuratie of bezoek de <a href="https://www.omrin.nl" style="color:#1a5fb4;">Omrin-website</a> voor de meest recente informatie.
-    </p>
-    """
+def render_html(items: list, tomorrow: date) -> str:
+    rows = "\n".join(
+        f"<li><b>{item.get('Omschrijving','')}</b> – {item.get('Info','')}</li>" for item in items
+    )
+    return _wrap(f'<ul style="font-family:Arial,sans-serif; font-size:14px;">{rows}</ul>', tomorrow)
 
 
-def build_section(arg1, huisnummer=None, today: date | None = None):
-    """Builds the Omrin section.
+def render_nothing_scheduled(tomorrow: date) -> str:
+    return _wrap(
+        '<p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>',
+        tomorrow,
+    )
 
-    Accepts either:
-    - `config` dict (preferred): call as `build_section(config)` where
-      `config["waste"]["postcode"]` and `config["waste"]["huisnummer"]`
-      are used, or
-    - legacy signature: `build_section(postcode, huisnummer, today)`.
-    """
-    # Support both the old (postcode, huisnummer, today) and new (config)
-    # call patterns so callers in main.py and test_omrin.py both work.
-    if isinstance(arg1, dict):
-        cfg = arg1
-        postcode = cfg["waste"]["postcode"]
-        huisnummer = cfg["waste"].get("huisnummer")
-        today = today or date.today()
-    else:
-        postcode = arg1
-        today = today or date.today()
+
+def render_no_data(tomorrow: date) -> str:
+    return _wrap(
+        '<p style="font-family:Arial,sans-serif; font-size:14px; color:#999;">'
+        'Kon ophaalschema niet ophalen — controleer sources/omrin_api.py en sources/omrin_section.py.'
+        "</p>",
+        tomorrow,
+    )
+
+
+def build_section(config: dict, today: date | None = None) -> str:
+    today = today or date.today()
+    postcode = config["waste"]["postcode"]
+    huisnummer = config["waste"]["huisnummer"]
+    tomorrow = today + timedelta(days=1)
 
     calendar = get_calendar(postcode, huisnummer, today)
     items = find_tomorrow_items(calendar, today)
-    tomorrow = today + timedelta(days=1)
-
-    # If we have calendar data but no items for tomorrow, that means
-    # explicitly: nothing is collected tomorrow. Show that to readers.
-    if calendar and not items:
-        return f"""
-        <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
-            ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
-        </h2>
-        <p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>
-        """
 
     if items:
         return render_html(items, tomorrow)
 
-    # No calendar data available for the current month.
-    # Inspect the full cache: if there are entries for other months but
-    # none for tomorrow, we can safely conclude "nothing collected
-    # tomorrow" and show that. Only if the cache is empty do we try the
-    # web-scraper fallback.
-    full_cache = _load_cache()
-    if full_cache:
-        # Check if any cached entry matches tomorrow
-        found = False
-        for month_items in full_cache.values():
-            for it in month_items:
-                try:
-                    d = datetime.strptime(it["Datum"], DATETIME_FORMAT).date()
-                    if d == tomorrow:
-                        found = True
-                        break
-                except Exception:
-                    continue
-            if found:
-                break
-        if not found:
-            return f"""
-            <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
-                ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
-            </h2>
-            <p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>
-            """
+    if calendar:
+        # We got real, current calendar data and tomorrow genuinely isn't in
+        # it — that's a confirmed "nothing collected", not a failure.
+        return render_nothing_scheduled(tomorrow)
 
-    # Try the HTML scraper fallback which sometimes works when the API
-    # doesn't expose the needed range.
+    # calendar is empty: either the API failed, or it's genuinely disabled.
+    # Try the old HTML scraper as a last resort before giving up honestly.
+    log.info("No API calendar data available — trying HTML scraper fallback")
     try:
         from sources import omrin as web_omrin
 
-        waste_cfg = {"postcode": postcode, "huisnummer": huisnummer}
-        if isinstance(arg1, dict):
-            waste_cfg["toevoeging"] = arg1.get("waste", {}).get("toevoeging", "")
-
+        waste_cfg = {
+            "postcode": postcode,
+            "huisnummer": huisnummer,
+            "toevoeging": config["waste"].get("toevoeging", ""),
+        }
         collections = web_omrin.get_tomorrow_collections(waste_cfg)
         return web_omrin.render_html(collections)
     except Exception:
+        log.exception("HTML scraper fallback also failed")
         return render_no_data(tomorrow)

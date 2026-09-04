@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -46,8 +47,17 @@ def _tomorrow_range_utc() -> tuple[str, str]:
     return start, end
 
 
-def get_day_ahead_prices() -> list[tuple[datetime, float]]:
-    """Return (timestamp, EUR/kWh excl. everything) for tomorrow, from EnergyZero."""
+def get_day_ahead_prices(retries: int = 3, backoff_seconds: float = 5.0) -> list[tuple[datetime, float]]:
+    """Return (timestamp, EUR/kWh excl. everything) for tomorrow, from EnergyZero.
+
+    Retries a few times with backoff before giving up — the timeout seen
+    in production so far only ever happened under cron, never running the
+    same call interactively, which points at something environmental
+    (see diagnose_network.py) rather than the API itself being down. A
+    short retry loop is cheap insurance either way: it papers over a
+    transient blip, and if it's a persistent environmental issue instead,
+    the final exception still propagates with the same clear traceback.
+    """
     start, end = _tomorrow_range_utc()
     params = {
         "fromDate": start,
@@ -56,9 +66,21 @@ def get_day_ahead_prices() -> list[tuple[datetime, float]]:
         "usageType": 1,     # electricity, consumption
         "inclBtw": "false", # we apply our own markup+btw stack below
     }
-    resp = requests.get(ENERGYZERO_URL, params=params, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(ENERGYZERO_URL, params=params, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            log.warning("EnergyZero request failed (attempt %d/%d): %r", attempt, retries, exc)
+            if attempt < retries:
+                time.sleep(backoff_seconds * attempt)
+    else:
+        raise RuntimeError(f"EnergyZero unreachable after {retries} attempts") from last_exc
 
     prices = data.get("Prices") or data.get("prices") or []
     if not prices:

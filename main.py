@@ -17,7 +17,7 @@ from pathlib import Path
 
 import emailer
 import render
-from sources import energy, euribor, nos, omrin_section, slieker, weather
+from sources import energy, euribor, history, lc, nos, omrin_section, slieker, weather
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -43,9 +43,9 @@ def build_sections(config: dict) -> tuple[list[str], list[tuple[str, bytes, str]
         ("Omrin", omrin_section),
         ("Weer", weather),
         ("Slieker Film", slieker),
-        ("Vandaag — geschiedenis", __import__("sources.history", fromlist=[None])),
+        ("Vandaag — geschiedenis", history),
         ("NOS", nos),
-        ("LC", __import__("sources.lc", fromlist=[None])),
+        ("LC", lc),
     ]
 
     # Energy is built separately since it also returns an image to embed.
