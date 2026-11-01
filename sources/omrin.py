@@ -8,8 +8,10 @@ How the site works (checked in a real browser, Nov 2026):
   Each waste type is a `.toggle__item` with a 12-column
   `table.table--calendar-desktop` (one column per month, day numbers in
   the cells). A `*` after a day means "gewijzigde inzameldag".
-- The year comes from the tab label ("2026"); late in the year a second
-  tab for the next year may appear, which is parsed too.
+- There is one tab per year, each with a heading like "Afvalkalender 2026".
+  Once Omrin publishes next year, a second tab appears; every tab is
+  parsed, with the year read from its heading and the month of each column
+  read from the table header.
 
 Note: HTTPS only works on this machine because main.py calls
 truststore.inject_into_ssl() — Norton re-signs TLS traffic with its own
@@ -46,36 +48,61 @@ def _fetch_calendar_html(postcode: str, huisnummer: int, toevoeging: str = "") -
     return resp.text
 
 
+_MONTHS = {
+    "jan": 1, "feb": 2, "mrt": 3, "maa": 3, "apr": 4, "mei": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dec": 12,
+}
+
+
+def _tab_year(tab) -> int | None:
+    """Year of a calendar tab, from its heading ("Afvalkalender 2027")."""
+    heading = tab.select_one(".tab__header") or tab
+    m = re.search(r"\b(20\d\d)\b", heading.get_text(" ", strip=True))
+    return int(m.group(1)) if m else None
+
+
+def _column_months(table) -> list[int | None]:
+    """Month number per column, read from the header ("Januari", "Februari", ...)."""
+    return [_MONTHS.get(th.get_text(strip=True).lower()[:3]) for th in table.select("thead th")]
+
+
 def parse_calendar(html: str) -> list[dict]:
-    """Returns [{"Datum": "YYYY-MM-DD", "Omschrijving": ..., "Info": ...}, ...]."""
+    """Returns [{"Datum": "YYYY-MM-DD", "Omschrijving": ..., "Info": ...}, ...]
+    for every year shown on the page (one tab per year)."""
     soup = BeautifulSoup(html, "html.parser")
-    labels = [label.get_text(strip=True) for label in soup.select(".tabs > label")]
-    tabs = soup.select(".tabs > .tab")
 
     items = []
-    for label, tab in zip(labels, tabs):
-        if not label.isdigit():
+    for tab in soup.select(".tabs .tab"):
+        year = _tab_year(tab)
+        if year is None:
             continue
-        year = int(label)
         for entry in tab.select(".toggle__item"):
             title = entry.select_one(".toggle__title")
             name = title.find(string=True, recursive=False).strip() if title else ""
             table = entry.select_one("table.table--calendar-desktop")
             if not name or table is None:
                 continue
+            months = _column_months(table)
             for row in table.select("tbody tr"):
-                for month, cell in enumerate(row.find_all("td"), start=1):
+                for month, cell in zip(months, row.find_all("td")):
                     text = cell.get_text(strip=True)
                     m = re.match(r"(\d{1,2})", text)
-                    if not m:
+                    if not month or not m:
                         continue
-                    day = date(year, month, int(m.group(1)))
+                    try:
+                        day = date(year, month, int(m.group(1)))
+                    except ValueError:
+                        continue
                     items.append({
                         "Datum": day.isoformat(),
                         "Omschrijving": name,
                         "Info": CHANGED_NOTE if "*" in text else "",
                     })
     return sorted(items, key=lambda i: (i["Datum"], i["Omschrijving"]))
+
+
+def years_in(calendar: list[dict]) -> set[int]:
+    return {int(item["Datum"][:4]) for item in calendar}
 
 
 def fetch_calendar(postcode: str, huisnummer: int, toevoeging: str = "") -> list[dict]:

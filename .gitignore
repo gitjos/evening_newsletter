@@ -3,3 +3,4 @@ __pycache__/
 sources/__pycache__/
 venv/
 preview.html
+state/omrin_cache.json

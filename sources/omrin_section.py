@@ -1,14 +1,19 @@
 """
 "Afvalinzameling morgen" section of the newsletter.
 
-Data sources, in order:
-1. Live: scraped from omrin.nl on every run (sources/omrin.py).
-2. The last successful live fetch, kept in state/omrin_cache.json, in case
-   omrin.nl is down or changes its page.
-3. The hand-maintained sources/omrin_schedule.json, as a last resort.
+Data sources:
+1. Live: scraped from omrin.nl (sources/omrin.py), at most once per calendar
+   month. The result is kept in state/omrin_cache.json and reused for the
+   rest of the month.
+2. If the live fetch fails, the last successful fetch from the cache is
+   used, or else the hand-maintained sources/omrin_schedule.json. The email
+   then shows a line that live retrieval failed, and the next run retries.
 
-The old Freed app API (api-omrin.freed.nl) stopped returning data in late
-2026 and was removed.
+Year boundaries: Omrin shows one tab per year (a second year appears once
+it is published). All tabs are parsed. If tomorrow falls in a year the
+cached calendar doesn't cover (31 December), it fetches again early; if
+Omrin hasn't published that year yet, the email says so instead of
+claiming nothing is collected.
 """
 from __future__ import annotations
 
@@ -53,25 +58,37 @@ def _save_cache(cache: dict) -> None:
 
 
 def get_calendar(postcode: str, huisnummer: int, toevoeging: str, today: date) -> tuple[list, str]:
-    """Returns (calendar, source) where source is "live", "cache" or "manual"."""
+    """Returns (calendar, note). note is "" when the data is fresh, else a
+    line for the email explaining that live retrieval failed."""
     key = _cache_key(postcode, huisnummer, toevoeging)
     cache = _load_cache()
+    cached = cache.get(key) if isinstance(cache.get(key), dict) else None
+    tomorrow = today + timedelta(days=1)
+
+    if cached and cached.get("calendar"):
+        fetched_this_month = cached.get("fetched", "")[:7] == today.isoformat()[:7]
+        covers_tomorrow = tomorrow.year in omrin.years_in(cached["calendar"])
+        if fetched_this_month and covers_tomorrow:
+            return cached["calendar"], ""
 
     try:
         data = omrin.fetch_calendar(postcode, huisnummer, toevoeging)
         cache[key] = {"fetched": today.isoformat(), "calendar": data}
         _save_cache(cache)
-        return data, "live"
+        log.info("Fetched Omrin calendar live (%d entries, years %s)", len(data), sorted(omrin.years_in(data)))
+        return data, ""
     except Exception:
         log.exception("Live Omrin fetch failed")
 
-    cached = cache.get(key)
-    if isinstance(cached, dict) and cached.get("calendar"):
-        log.warning("Using cached Omrin calendar from %s", cached.get("fetched"))
-        return cached["calendar"], "cache"
+    if cached and cached.get("calendar"):
+        fetched = cached.get("fetched", "?")
+        return cached["calendar"], (
+            f"Live ophalen van de Omrin-kalender is mislukt; schema van {fetched} gebruikt."
+        )
 
-    log.warning("Using hand-maintained omrin_schedule.json")
-    return _manual_calendar(), "manual"
+    return _manual_calendar(), (
+        "Live ophalen van de Omrin-kalender is mislukt; handmatig schema (omrin_schedule.json) gebruikt."
+    )
 
 
 def find_tomorrow_items(calendar_data: list, today: date) -> list:
@@ -81,7 +98,7 @@ def find_tomorrow_items(calendar_data: list, today: date) -> list:
 
 def _wrap(body_html: str, tomorrow: date, note: str = "") -> str:
     footer = (
-        f'<p style="font-family:Arial,sans-serif; font-size:11px; color:#999;">{note}</p>' if note else ""
+        f'<p style="font-family:Arial,sans-serif; font-size:12px; color:#b00020;">⚠️ {note}</p>' if note else ""
     )
     return f"""
     <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
@@ -108,20 +125,12 @@ def render_nothing_scheduled(tomorrow: date, note: str = "") -> str:
     )
 
 
-def render_no_data(tomorrow: date) -> str:
+def render_no_data(tomorrow: date, message: str, note: str = "") -> str:
     return _wrap(
-        '<p style="font-family:Arial,sans-serif; font-size:14px; color:#999;">'
-        "Kon ophaalschema niet ophalen — controleer sources/omrin.py."
-        "</p>",
+        f'<p style="font-family:Arial,sans-serif; font-size:14px; color:#999;">{message}</p>',
         tomorrow,
+        note,
     )
-
-
-_SOURCE_NOTES = {
-    "live": "",
-    "cache": "Let op: omrin.nl was niet bereikbaar, schema van een eerdere ophaalactie.",
-    "manual": "Let op: omrin.nl was niet bereikbaar, handmatig schema gebruikt.",
-}
 
 
 def build_section(config: dict, today: date | None = None) -> str:
@@ -129,11 +138,14 @@ def build_section(config: dict, today: date | None = None) -> str:
     waste = config["waste"]
     tomorrow = today + timedelta(days=1)
 
-    calendar, source = get_calendar(waste["postcode"], waste["huisnummer"], waste.get("toevoeging", ""), today)
+    calendar, note = get_calendar(waste["postcode"], waste["huisnummer"], waste.get("toevoeging", ""), today)
     if not calendar:
-        return render_no_data(tomorrow)
+        return render_no_data(tomorrow, "Kon ophaalschema niet ophalen — controleer sources/omrin.py.", note)
 
-    note = _SOURCE_NOTES[source]
+    if tomorrow.year not in omrin.years_in(calendar):
+        # Don't claim "nothing collected" for a year we have no calendar for.
+        return render_no_data(tomorrow, f"Omrin heeft de afvalkalender voor {tomorrow.year} nog niet gepubliceerd.", note)
+
     items = find_tomorrow_items(calendar, today)
     if items:
         return render_html(items, tomorrow, note)

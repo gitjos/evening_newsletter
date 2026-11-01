@@ -78,10 +78,11 @@ after a site redesign:
 
 - **`sources/omrin.py`** — posts postcode/huisnummer to the omrin.nl
   afvalkalender form (including its anti-forgery tokens) and parses the
-  server-rendered calendar tables. Verified against the live site in Nov
-  2026. If it fails, the section falls back to the last successful fetch
-  (`state/omrin_cache.json`), then to the hand-kept
-  `sources/omrin_schedule.json`, and says so in the email.
+  server-rendered calendar tables (all year tabs, so next year is picked up
+  once Omrin publishes it). Fetched at most once a month and cached in
+  `state/omrin_cache.json`. If a fetch fails, the email shows a line saying
+  live retrieval failed and uses the cached calendar (or the hand-kept
+  `sources/omrin_schedule.json`); the next run retries.
 - **`sources/slieker.py`** — scrapes MovieMeter's cinema-agenda page (day
   anchors + adjacent film/ticket links) rather than sliekerfilm.nl directly,
   since Slieker's own site is a booking widget. Same caveat: verified the
