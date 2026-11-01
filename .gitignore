@@ -2,3 +2,4 @@ config.json
 __pycache__/
 sources/__pycache__/
 venv/
+preview.html

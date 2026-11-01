@@ -11,7 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sources.omrin_api import fetch_omrin_calendar
+import truststore
+truststore.inject_into_ssl()  # Norton intercepts HTTPS; see sources/omrin.py
+
+from sources.omrin import fetch_calendar
 from sources.omrin_section import build_section
 
 POSTCODE = "8916ED"
@@ -22,7 +25,7 @@ CONFIG = {"waste": {"postcode": POSTCODE, "huisnummer": HUISNUMMER, "toevoeging"
 
 
 def main():
-    data = fetch_omrin_calendar(POSTCODE, HUISNUMMER)
+    data = fetch_calendar(POSTCODE, HUISNUMMER)
 
     print("=== Raw Omrin data ===")
     print(len(data), "entries")

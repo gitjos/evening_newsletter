@@ -13,7 +13,8 @@ main.py              orchestrator — run this from cron
 render.py            combines the per-topic HTML into one page
 emailer.py           SMTP sending (Gmail app password, same style as google_mail_archiver)
 sources/
-  omrin.py           waste collection — see file header, this one needs verification
+  omrin.py           waste collection — scrapes the omrin.nl afvalkalender form
+  omrin_section.py   Omrin newsletter section, with cache + omrin_schedule.json fallback
   energy.py          day-ahead price (EnergyZero) + ANWB markup/tax -> chart
   weather.py         Open-Meteo hourly forecast + tomorrow's sunrise/sunset
   slieker.py         today's programme, scraped via MovieMeter's cinema agenda
@@ -21,9 +22,15 @@ sources/
   euribor.py         ported from your Node-RED flow — date logic + FD.nl scrape
 state/
   euribor_state.json created automatically, tracks "already sent this month"
+  omrin_cache.json   last successful Omrin fetch, used if omrin.nl is down
 ```
 
 ## Setup
+
+Note: if HTTPS calls fail with `CERTIFICATE_VERIFY_FAILED`, an antivirus
+(Norton here) is intercepting TLS. `main.py` calls
+`truststore.inject_into_ssl()` so Python uses the Windows certificate store;
+for pip use `pip install --use-feature=truststore -r requirements.txt`.
 
 ```bash
 cd evening_newsletter
@@ -69,14 +76,12 @@ that section just prints an inline error and the rest of the email still
 goes out. But two sources are genuinely more likely to need your attention
 after a site redesign:
 
-- **`sources/omrin.py`** — Omrin's calendar is a JS widget with no public
-  API I could find or verify from here. The module submits
-  postcode/huisnummer as query params to the public calendar page and
-  parses the resulting table, mirroring what other open-source Omrin
-  integrations do — but I couldn't run it against the live site to confirm
-  the exact request/response shape. The file header has step-by-step
-  instructions for capturing the real request from your browser's devtools
-  if it comes back empty.
+- **`sources/omrin.py`** — posts postcode/huisnummer to the omrin.nl
+  afvalkalender form (including its anti-forgery tokens) and parses the
+  server-rendered calendar tables. Verified against the live site in Nov
+  2026. If it fails, the section falls back to the last successful fetch
+  (`state/omrin_cache.json`), then to the hand-kept
+  `sources/omrin_schedule.json`, and says so in the email.
 - **`sources/slieker.py`** — scrapes MovieMeter's cinema-agenda page (day
   anchors + adjacent film/ticket links) rather than sliekerfilm.nl directly,
   since Slieker's own site is a booking widget. Same caveat: verified the

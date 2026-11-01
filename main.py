@@ -15,6 +15,10 @@ import json
 import logging
 from pathlib import Path
 
+import truststore
+
+truststore.inject_into_ssl()
+
 import emailer
 import render
 from sources import energy, euribor, history, lc, nos, omrin_section, slieker, weather

@@ -1,165 +1,140 @@
 """
-Wraps sources/omrin_api.py (the real Freed/Omrin backend) with a monthly
-cache, so we don't hit the API more than once a month, and a fallback to
-the old HTML scraper (sources/omrin.py) if the API is ever unreachable.
+"Afvalinzameling morgen" section of the newsletter.
 
-Two bugs fixed here from the first pass at this file:
+Data sources, in order:
+1. Live: scraped from omrin.nl on every run (sources/omrin.py).
+2. The last successful live fetch, kept in state/omrin_cache.json, in case
+   omrin.nl is down or changes its page.
+3. The hand-maintained sources/omrin_schedule.json, as a last resort.
 
-1. `from omrin_api import ...` was a bare import. That only resolves when
-   a script runs *from inside* sources/ (e.g. `cd sources && python
-   test_omrin.py`) — which is how the standalone test worked. Run through
-   main.py from the project root, as cron actually does, and the import
-   fails, and the `except ImportError:` below silently swallowed it and
-   substituted a stub that always returns []. That's *why the real API
-   looked broken* even though test_omrin.py proved it works. Fixed to an
-   absolute `from sources.omrin_api import ...`, and the fallback now logs
-   a warning instead of failing silently.
-
-2. A failed or empty fetch used to get cached and then treated as
-   authoritative "nothing collected" data — so once the API failed once,
-   every run for the rest of the month confidently reported "morgen wordt
-   niets opgehaald" instead of retrying or falling back to the scraper.
-   Only a genuinely non-empty result is cached now; a failure always
-   retries next run and falls through to the HTML-scraper fallback
-   immediately, rather than being masked for a month.
+The old Freed app API (api-omrin.freed.nl) stopped returning data in late
+2026 and was removed.
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
+
+from sources import omrin
 
 log = logging.getLogger(__name__)
 
-try:
-    from sources.omrin_api import fetch_omrin_calendar
-except ImportError:
-    log.warning(
-        "sources.omrin_api could not be imported (missing rsa/pycryptodome?) "
-        "— Omrin API disabled for this run, falling back to the HTML scraper."
-    )
-    fetch_omrin_calendar = None
-
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "omrin_cache.json"
-DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+SCHEDULE_FILE = Path(__file__).resolve().parent / "omrin_schedule.json"
 
 
-def _cache_key(postcode: str, huisnummer: int, today: date) -> str:
-    return f"{postcode}-{huisnummer}-{today.strftime('%Y-%m')}"
+def _manual_calendar() -> list:
+    """Calendar built from the hand-maintained omrin_schedule.json, if present."""
+    if not SCHEDULE_FILE.exists():
+        return []
+    schedule = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+    return [
+        {"Datum": day, "Omschrijving": name, "Info": ""}
+        for name, days in schedule.items()
+        for day in days
+    ]
+
+
+def _cache_key(postcode: str, huisnummer: int, toevoeging: str) -> str:
+    return f"{postcode}-{huisnummer}{toevoeging}"
 
 
 def _load_cache() -> dict:
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     return {}
 
 
 def _save_cache(cache: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(cache))
+    STATE_FILE.write_text(json.dumps(cache), encoding="utf-8")
 
 
-def get_calendar(postcode: str, huisnummer: int, today: date) -> list:
-    """Returns the cached calendar for this address if we have one, else
-    fetches fresh from the API. Never caches an empty/failed result —
-    that would silently masquerade as "confirmed nothing scheduled"."""
-    key = _cache_key(postcode, huisnummer, today)
+def get_calendar(postcode: str, huisnummer: int, toevoeging: str, today: date) -> tuple[list, str]:
+    """Returns (calendar, source) where source is "live", "cache" or "manual"."""
+    key = _cache_key(postcode, huisnummer, toevoeging)
     cache = _load_cache()
-    cached = cache.get(key)
-    if cached:
-        return cached
-
-    if fetch_omrin_calendar is None:
-        return []
 
     try:
-        data = fetch_omrin_calendar(postcode, huisnummer)
-    except Exception:
-        log.exception("Omrin API call failed")
-        return []
-
-    if data:
-        cache[key] = data
+        data = omrin.fetch_calendar(postcode, huisnummer, toevoeging)
+        cache[key] = {"fetched": today.isoformat(), "calendar": data}
         _save_cache(cache)
-    else:
-        log.warning("Omrin API returned no calendar data for %s %s", postcode, huisnummer)
+        return data, "live"
+    except Exception:
+        log.exception("Live Omrin fetch failed")
 
-    return data
+    cached = cache.get(key)
+    if isinstance(cached, dict) and cached.get("calendar"):
+        log.warning("Using cached Omrin calendar from %s", cached.get("fetched"))
+        return cached["calendar"], "cache"
+
+    log.warning("Using hand-maintained omrin_schedule.json")
+    return _manual_calendar(), "manual"
 
 
 def find_tomorrow_items(calendar_data: list, today: date) -> list:
-    tomorrow = today + timedelta(days=1)
-    items = []
-    for item in calendar_data:
-        d = datetime.strptime(item["Datum"], DATETIME_FORMAT).date()
-        if d == tomorrow:
-            items.append(item)
-    return items
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    return [item for item in calendar_data if item["Datum"][:10] == tomorrow]
 
 
-def _wrap(body_html: str, tomorrow: date) -> str:
+def _wrap(body_html: str, tomorrow: date, note: str = "") -> str:
+    footer = (
+        f'<p style="font-family:Arial,sans-serif; font-size:11px; color:#999;">{note}</p>' if note else ""
+    )
     return f"""
     <h2 style="font-family:Arial,sans-serif; color:#222; border-bottom:2px solid #eee; padding-bottom:4px;">
         ♻️ Afvalinzameling morgen ({tomorrow.isoformat()})
     </h2>
     {body_html}
+    {footer}
     """
 
 
-def render_html(items: list, tomorrow: date) -> str:
+def render_html(items: list, tomorrow: date, note: str = "") -> str:
     rows = "\n".join(
-        f"<li><b>{item.get('Omschrijving','')}</b> – {item.get('Info','')}</li>" for item in items
+        f"<li><b>{item.get('Omschrijving','')}</b>" + (f" – {item['Info']}" if item.get("Info") else "") + "</li>"
+        for item in items
     )
-    return _wrap(f'<ul style="font-family:Arial,sans-serif; font-size:14px;">{rows}</ul>', tomorrow)
+    return _wrap(f'<ul style="font-family:Arial,sans-serif; font-size:14px;">{rows}</ul>', tomorrow, note)
 
 
-def render_nothing_scheduled(tomorrow: date) -> str:
+def render_nothing_scheduled(tomorrow: date, note: str = "") -> str:
     return _wrap(
         '<p style="font-family:Arial,sans-serif; font-size:14px; color:#666;">Morgen wordt niets opgehaald.</p>',
         tomorrow,
+        note,
     )
 
 
 def render_no_data(tomorrow: date) -> str:
     return _wrap(
         '<p style="font-family:Arial,sans-serif; font-size:14px; color:#999;">'
-        'Kon ophaalschema niet ophalen — controleer sources/omrin_api.py en sources/omrin_section.py.'
+        "Kon ophaalschema niet ophalen — controleer sources/omrin.py."
         "</p>",
         tomorrow,
     )
 
 
+_SOURCE_NOTES = {
+    "live": "",
+    "cache": "Let op: omrin.nl was niet bereikbaar, schema van een eerdere ophaalactie.",
+    "manual": "Let op: omrin.nl was niet bereikbaar, handmatig schema gebruikt.",
+}
+
+
 def build_section(config: dict, today: date | None = None) -> str:
     today = today or date.today()
-    postcode = config["waste"]["postcode"]
-    huisnummer = config["waste"]["huisnummer"]
+    waste = config["waste"]
     tomorrow = today + timedelta(days=1)
 
-    calendar = get_calendar(postcode, huisnummer, today)
-    items = find_tomorrow_items(calendar, today)
-
-    if items:
-        return render_html(items, tomorrow)
-
-    if calendar:
-        # We got real, current calendar data and tomorrow genuinely isn't in
-        # it — that's a confirmed "nothing collected", not a failure.
-        return render_nothing_scheduled(tomorrow)
-
-    # calendar is empty: either the API failed, or it's genuinely disabled.
-    # Try the old HTML scraper as a last resort before giving up honestly.
-    log.info("No API calendar data available — trying HTML scraper fallback")
-    try:
-        from sources import omrin as web_omrin
-
-        waste_cfg = {
-            "postcode": postcode,
-            "huisnummer": huisnummer,
-            "toevoeging": config["waste"].get("toevoeging", ""),
-        }
-        collections = web_omrin.get_tomorrow_collections(waste_cfg)
-        return web_omrin.render_html(collections)
-    except Exception:
-        log.exception("HTML scraper fallback also failed")
+    calendar, source = get_calendar(waste["postcode"], waste["huisnummer"], waste.get("toevoeging", ""), today)
+    if not calendar:
         return render_no_data(tomorrow)
+
+    note = _SOURCE_NOTES[source]
+    items = find_tomorrow_items(calendar, today)
+    if items:
+        return render_html(items, tomorrow, note)
+    return render_nothing_scheduled(tomorrow, note)
