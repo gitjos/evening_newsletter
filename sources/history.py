@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 # Wikimedia blocks requests with generic/default User-Agents outright.
 # https://meta.wikimedia.org/wiki/User-Agent_policy
-HEADERS = {"User-Agent": "AvondbriefNewsletter/1.0 (personal, non-commercial home-lab project)"}
+HEADERS = {"User-Agent": "AvondbriefNewsletter/1.0 (https://github.com/gitjos/evening_newsletter)"}
 
 CURRENT_URL = "https://api.wikimedia.org/feed/v1/wikipedia/{lang}/onthisday/events/{month:02d}/{day:02d}"
 LEGACY_URL = "https://{lang}.wikipedia.org/api/rest_v1/feed/onthisday/events/{month:02d}/{day:02d}"
@@ -99,6 +99,20 @@ def render_html(events: list[Event], count: int = 5) -> str:
     """
 
 
+def _spread_across_decades(events: list[Event], count: int) -> list[Event]:
+    """Round-robin one event per decade, newest decade first, so the list isn't all from one era."""
+    by_decade: dict[int, list[Event]] = {}
+    for ev in sorted(events, key=lambda e: e.year, reverse=True):
+        by_decade.setdefault(ev.year // 10, []).append(ev)
+
+    picked: list[Event] = []
+    while len(picked) < count and any(by_decade.values()):
+        for decade in sorted(by_decade, reverse=True):
+            if by_decade[decade] and len(picked) < count:
+                picked.append(by_decade[decade].pop(0))
+    return picked
+
+
 def build_section(config: dict) -> str:
     cfg = config.get("history", {})
     lang = cfg.get("lang", "nl")
@@ -108,4 +122,4 @@ def build_section(config: dict) -> str:
     # If language returned nothing, try English as a fallback
     if not events and lang != "en":
         events = fetch_events_for_date(today.month, today.day, lang="en")
-    return render_html(events, count=count)
+    return render_html(_spread_across_decades(events, count), count=count)

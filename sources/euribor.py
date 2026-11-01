@@ -121,7 +121,8 @@ def fetch_euribor_rate(url: str, fixing_date: date) -> float:
 
     date_str = fixing_date.strftime("%d-%m-%Y")
     pattern = re.compile(
-        re.escape(date_str) + r'</td><td class="number">--</td><td class="price">(-?[0-9],[0-9]{3})'
+        # FD.nl trims trailing zeros (e.g. "2,46" instead of "2,460"), so accept any number of decimals.
+        re.escape(date_str) + r'</td><td class="number">[^<]*</td><td class="price">(-?[0-9]+(?:,[0-9]+)?)'
     )
     match = pattern.search(page)
     if not match:
